@@ -1,11 +1,11 @@
---- fixed_premium_bot.py
-+++ fixed_premium_bot.py
+--- working_premium_bot.py
++++ working_premium_bot.py
 @@ -0,0 +1,1057 @@
 +#!/usr/bin/env python3
 +"""
-+💎 Fixed Premium Bot - All Issues Resolved
++💎 working Premium Bot - All Issues Resolved
 +👨‍💻 Developer: @rsdy1
-+✅ Real AI Working, All Buttons Fixed, Complete Features
++✅ Real AI Working, All Buttons working, Complete Features
 +"""
 +
 +import os
@@ -165,7 +165,7 @@
 +db = SimpleDB()
 +
 +# Bot class
-+class FixedBot:
++class workingBot:
 +    def __init__(self):
 +        self.user_states = {}
 +        self.stats = {
@@ -409,7 +409,7 @@
 +        return InlineKeyboardMarkup(keyboard)
 +
 +# Initialize bot
-+bot = FixedBot()
++bot = workingBot()
 +
 +async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 +    """Start command handler"""
@@ -466,7 +466,7 @@
 +        )
 +
 +async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-+    """Handle callback queries - FIXED ALL BUTTONS"""
++    """Handle callback queries - working ALL BUTTONS"""
 +    try:
 +        query = update.callback_query
 +        await query.answer()
@@ -476,7 +476,7 @@
 +        
 +        logger.info(f"🔘 Callback: {data} from {user.first_name}")
 +        
-+        # Main Menu Button - FIXED
++        # Main Menu Button - working
 +        if data == "main_menu":
 +            is_admin = user.id == ADMIN_ID
 +            welcome_text = f"""
@@ -1025,7 +1025,7 @@
 +def main():
 +    """Main function"""
 +    try:
-+        logger.info("🚀 Starting FIXED premium bot...")
++        logger.info("🚀 Starting working premium bot...")
 +        
 +        # Validate token
 +        if not BOT_TOKEN or len(BOT_TOKEN) < 10:
@@ -1041,7 +1041,7 @@
 +        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 +        application.add_error_handler(error_handler)
 +        
-+        logger.info("✅ FIXED premium bot ready - all buttons working!")
++        logger.info("✅ working premium bot ready - all buttons working!")
 +        
 +        # Run the bot
 +        application.run_polling(drop_pending_updates=True)
