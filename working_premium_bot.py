@@ -1,30 +1,35 @@
 import os
 import logging
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode, ChatAction
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ChatMemberHandler
+from telegram.constants import ParseMode, ChatAction, ChatType
+from telegram.error import BadRequest, Forbidden
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Bot Configuration
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7500826569:AAHSXBY9elBf89fyAhV_EmGuUGrryGXdVq8')
-CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME', '@your_channel')  # غير هذا لقناتك
-CHANNEL_ID = os.getenv('CHANNEL_ID', '-1001234567890')  # غير هذا لـ ID قناتك
+ADMIN_ID = int(os.getenv('ADMIN_USER_ID', '606898749'))
 
 # AI Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '').strip()
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
 
-logger.info(f"🤖 AI Bot starting...")
-logger.info(f"📺 Channel: {CHANNEL_USERNAME}")
+logger.info(f"🤖 Channel Admin Bot starting...")
+logger.info(f"👤 Admin ID: {ADMIN_ID}")
 logger.info(f"🧠 OpenAI: {len(OPENAI_API_KEY)} chars")
 logger.info(f"🔮 Gemini: {len(GEMINI_API_KEY)} chars")
+
+# Bot stats
+bot_channels = {}  # Store channels where bot is admin
+user_sessions = {}  # Store user sessions
 
 # Initialize AI clients
 openai_client = None
 gemini_model = None
+gemini_vision = None
 
 # Try OpenAI
 if OPENAI_API_KEY:
@@ -46,21 +51,38 @@ if GEMINI_API_KEY:
     except Exception as e:
         logger.info(f"⚠️ Gemini not available: {e}")
 
-async def check_subscription(context, user_id):
-    """Check if user is subscribed to channel"""
-    try:
-        member = await context.bot.get_chat_member(CHANNEL_ID, user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except Exception as e:
-        logger.error(f"Subscription check error: {e}")
-        return False
+async def get_user_channels(context, user_id):
+    """Get channels where user should be subscribed and bot is admin"""
+    user_channels = []
+    
+    # Check all channels where bot is admin
+    for channel_id, channel_info in bot_channels.items():
+        try:
+            # Check if user is member
+            member = await context.bot.get_chat_member(channel_id, user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                user_channels.append(channel_info)
+        except Exception as e:
+            logger.error(f"Error checking membership in {channel_id}: {e}")
+    
+    return user_channels
 
-def create_subscription_keyboard():
-    """Create subscription keyboard"""
-    keyboard = [
-        [InlineKeyboardButton("📺 اشترك في القناة", url=f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}")],
-        [InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub")]
-    ]
+async def check_all_subscriptions(context, user_id):
+    """Check if user is subscribed to all required channels"""
+    required_channels = await get_user_channels(context, user_id)
+    return len(required_channels) == 0
+
+def create_subscription_keyboard(required_channels):
+    """Create subscription keyboard for required channels"""
+    keyboard = []
+    
+    for channel in required_channels:
+        channel_name = channel.get('title', channel.get('username', 'القناة'))
+        channel_link = f"https://t.me/{channel.get('username', '').replace('@', '')}"
+        keyboard.append([InlineKeyboardButton(f"📺 اشترك في {channel_name}", url=channel_link)])
+    
+    keyboard.append([InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_all_subs")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 async def get_ai_response(text, user_name="المستخدم"):
@@ -72,13 +94,13 @@ async def get_ai_response(text, user_name="المستخدم"):
             response = await openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "أنت مساعد ذكي متطور. أجب باللغة العربية بشكل مفصل ومفيد. يمكنك الترجمة بين اللغات وتحليل النصوص وحل المسائل."},
+                    {"role": "system", "content": "أنت مساعد ذكي متطور. أجب باللغة العربية بشكل مفصل ومفيد. يمكنك الترجمة بين اللغات وتحليل النصوص وحل المسائل والمساعدة في البرمجة."},
                     {"role": "user", "content": text}
                 ],
-                max_tokens=1000,
+                max_tokens=1500,
                 temperature=0.7
             )
-            return f"🤖 **ChatGPT:**\n\n{response.choices[0].message.content}"
+            return f"🤖 **ChatGPT-3.5:**\n\n{response.choices[0].message.content}"
         except Exception as e:
             logger.error(f"OpenAI error: {e}")
     
@@ -87,134 +109,277 @@ async def get_ai_response(text, user_name="المستخدم"):
         try:
             response = await asyncio.to_thread(
                 gemini_model.generate_content, 
-                f"أجب باللغة العربية بشكل مفصل ومفيد: {text}"
+                f"أجب باللغة العربية بشكل مفصل ومفيد وشامل: {text}"
             )
-            return f"🔮 **Gemini AI:**\n\n{response.text}"
+            return f"🔮 **Gemini Pro:**\n\n{response.text}"
         except Exception as e:
             logger.error(f"Gemini error: {e}")
     
-    # Smart fallback with more capabilities
+    # Smart fallback
     return get_smart_response(text, user_name)
 
 def get_smart_response(text, user_name):
-    """Smart fallback response with basic AI capabilities"""
+    """Smart fallback response with AI capabilities"""
     text_lower = text.lower()
     
-    # Translation detection
+    # Translation requests
     if any(word in text_lower for word in ['ترجم', 'translate', 'translation']):
         return f"""
 🔤 **خدمة الترجمة الذكية**
 
-📝 **النص المطلوب ترجمته:** {text}
+📝 **النص:** {text}
 
-🔄 **الترجمة التلقائية:**
-للحصول على ترجمة دقيقة ومتطورة، يرجى إضافة مفاتيح الذكاء الاصطناعي:
+🌍 **كشف اللغة:** {'العربية' if any(ord(c) > 1000 for c in text) else 'الإنجليزية'}
 
-🤖 **OpenAI GPT** - ترجمة طبيعية ودقيقة
-🔮 **Google Gemini** - ترجمة مجانية متقدمة
+🔄 **محاولة ترجمة أساسية:**
+{translate_basic(text)}
 
-💡 **حاول كتابة:** "ترجم إلى الإنجليزية: مرحبا بك"
+💡 **للترجمة المتقدمة:**
+أضف مفاتيح الذكاء الاصطناعي للحصول على:
+• ترجمة دقيقة 100%
+• سياق طبيعي
+• تصحيح نحوي
+• أكثر من 100 لغة
 """
     
     # Math problems
-    elif any(word in text_lower for word in ['احسب', 'حل', 'رياضة', 'math', 'calculate']):
+    elif any(word in text_lower for word in ['احسب', 'حل', 'رياضة', 'math', 'calculate', '+', '-', '*', '/', '=', '×', '÷']):
         return f"""
-📊 **حل المسائل الرياضية**
+📊 **آلة حاسبة ذكية**
 
-🧮 **السؤال:** {text}
+🧮 **العملية:** {text}
 
-💡 **للحصول على حلول رياضية متقدمة:**
-• معادلات معقدة
-• حسابات إحصائية  
-• تحليل البيانات
-• الهندسة والجبر
+💫 **محاولة حل أساسية:**
+{calculate_basic(text)}
 
-🚀 **فعّل الذكاء الاصطناعي للحصول على حلول دقيقة خطوة بخطوة!**
+🚀 **للرياضيات المتقدمة:**
+• معادلات تفاضلية
+• إحصاء وتحليل البيانات
+• هندسة وجبر متقدم
+• حسابات علمية معقدة
+• شرح خطوة بخطوة
+
+💡 فعّل الذكاء الاصطناعي للحصول على حلول شاملة!
 """
     
     # Programming questions
-    elif any(word in text_lower for word in ['برمجة', 'كود', 'python', 'javascript', 'html', 'css']):
+    elif any(word in text_lower for word in ['برمجة', 'كود', 'python', 'javascript', 'html', 'css', 'java', 'c++', 'php', 'react', 'flutter']):
         return f"""
-💻 **مساعد البرمجة الذكي**
+💻 **مساعد البرمجة المتقدم**
 
 👨‍💻 **سؤالك:** {text}
 
-🚀 **يمكنني مساعدتك في:**
-• كتابة الأكواد من الصفر
-• إصلاح الأخطاء البرمجية
-• شرح المفاهيم البرمجية
+🚀 **خدمات البرمجة المتاحة:**
+• كتابة كود من الصفر
+• إصلاح الأخطاء والباغز
 • مراجعة وتحسين الكود
-• تعلم لغات برمجة جديدة
+• شرح المفاهيم البرمجية
+• تصميم قواعد البيانات
+• تطوير تطبيقات الويب والموبايل
 
-💡 **لمساعدة برمجية متقدمة، فعّل الذكاء الاصطناعي!**
+💡 **لغات البرمجة المدعومة:**
+Python, JavaScript, Java, C++, PHP, Swift, Kotlin, React, Flutter, وأكثر
+
+🔧 **للحصول على مساعدة تفصيلية:**
+فعّل الذكاء الاصطناعي المتقدم!
 """
     
-    # General questions
-    elif any(word in text_lower for word in ['ما هو', 'كيف', 'متى', 'أين', 'لماذا', 'what', 'how', 'why']):
+    # General knowledge questions
+    elif any(word in text_lower for word in ['ما هو', 'كيف', 'متى', 'أين', 'لماذا', 'what', 'how', 'why', 'when', 'where']):
         return f"""
-🤔 **إجابة ذكية على سؤالك**
+🤔 **موسوعة المعرفة الذكية**
 
 ❓ **سؤالك:** {text}
 
-💭 **تحليل السؤال:**
-هذا سؤال يتطلب معرفة وتحليل عميق. 
+📚 **تحليل السؤال:**
+• نوع السؤال: معرفي عام
+• المجال: {detect_topic(text)}
+• صعوبة: متوسطة
 
-🧠 **إجابة أساسية:**
-للحصول على إجابة شاملة ومفصلة، أنصح بتفعيل الذكاء الاصطناعي المتقدم.
+💭 **إجابة مبدئية:**
+هذا سؤال ممتاز يتطلب بحث وتحليل معمق.
 
-🚀 **مع الذكاء الاصطناعي ستحصل على:**
+🧠 **مع الذكاء الاصطناعي ستحصل على:**
 • إجابات مفصلة ودقيقة
-• مصادر وأمثلة
+• مصادر وأمثلة حقيقية
 • تحليل شامل للموضوع
 • معلومات حديثة ومحدثة
+• شرح مبسط وواضح
+
+🌟 **الخلاصة:** سؤال رائع يستحق إجابة متطورة!
 """
     
     # Greetings
-    elif any(word in text_lower for word in ['مرحبا', 'السلام', 'أهلا', 'hello', 'hi']):
+    elif any(word in text_lower for word in ['مرحبا', 'السلام', 'أهلا', 'hello', 'hi', 'hey']):
         return f"""
 🌟 **أهلاً وسهلاً {user_name}!**
 
-مرحباً بك في بوت الذكاء الاصطناعي المتطور!
+مرحباً بك في **بوت الذكاء الاصطناعي المتطور**!
 
-🧠 **يمكنني مساعدتك في:**
-• الإجابة على جميع الأسئلة
-• الترجمة بين اللغات
-• حل المسائل الرياضية
-• المساعدة في البرمجة
+🧠 **قدراتي الذكية:**
+• إجابة جميع أنواع الأسئلة
+• ترجمة فورية لأكثر من 100 لغة
+• حل المسائل الرياضية المعقدة
+• مساعدة شاملة في البرمجة
 • تحليل وشرح النصوص
-• تحليل الصور (قريباً)
+• تحليل الصور بالذكاء الاصطناعي
+• كتابة وتحرير المحتوى
+• استشارات تقنية ومهنية
 
-💬 **اسألني أي شيء تريد معرفته!**
+💬 **كيفية الاستخدام:**
+أرسل لي أي سؤال أو طلب وسأساعدك فوراً!
+
+🚀 **جودة الإجابات:**
+• أساسية: متاحة الآن
+• متقدمة: مع تفعيل مفاتيح الذكاء الاصطناعي
+
+📸 **جديد:** يمكنني تحليل الصور أيضاً!
+
+💡 **ابدأ بسؤالك الآن...**
 """
     
     else:
         return f"""
-🧠 **الذكاء الاصطناعي يحلل رسالتك...**
+🧠 **محلل النصوص الذكي**
 
-📝 **رسالتك:** "{text}"
+📝 **نصك:** "{text}"
 
 🔍 **التحليل الذكي:**
-• عدد الأحرف: {len(text)}
-• عدد الكلمات: {len(text.split())}
-• اللغة المكتشفة: {'العربية' if any(ord(c) > 1000 for c in text) else 'الإنجليزية'}
+• الطول: {len(text)} حرف
+• الكلمات: {len(text.split())} كلمة
+• اللغة: {'العربية' if any(ord(c) > 1000 for c in text) else 'الإنجليزية'}
+• النوع: {detect_text_type(text)}
+• المعنى: {analyze_sentiment(text)}
 
-💡 **كيف يمكنني مساعدتك بشكل أفضل:**
+💡 **كيف يمكنني مساعدتك أكثر:**
 • اطرح أسئلة محددة
-• اطلب الترجمة
-• اسأل عن البرمجة
+• اطلب الترجمة لأي لغة
+• اسأل عن البرمجة والتقنية
 • احتج لحل مسائل رياضية
+• اطلب تحليل أو شرح النص
+• أرسل صورة للتحليل
 
-🚀 **للحصول على إجابات متطورة، فعّل الذكاء الاصطناعي المتقدم!**
+🚀 **للحصول على تحليل متقدم:**
+فعّل الذكاء الاصطناعي للحصول على:
+• تحليل عميق للمحتوى
+• اقتراحات ذكية
+• معلومات إضافية
+• سياق أوسع
 
-⚙️ **حالة النظام:**
-• OpenAI: {'🟢 متاح' if openai_client else '🔴 يحتاج تفعيل'}
-• Gemini: {'🟢 متاح' if gemini_model else '🔴 يحتاج تفعيل'}
+⚙️ **حالة الأنظمة:**
+• OpenAI: {'🟢 نشط' if openai_client else '🔴 يحتاج تفعيل'}
+• Gemini: {'🟢 نشط' if gemini_model else '🔴 يحتاج تفعيل'}
+• التحليل الأساسي: 🟢 متاح دائماً
+
+🎯 **الخلاصة:** نص مثير للاهتمام، كيف يمكنني مساعدتك أكثر؟
 """
+
+def translate_basic(text):
+    """Basic translation attempt"""
+    # Simple translation patterns
+    translations = {
+        'hello': 'مرحبا',
+        'hi': 'أهلا',
+        'thank you': 'شكراً لك',
+        'good morning': 'صباح الخير',
+        'good evening': 'مساء الخير',
+        'مرحبا': 'Hello',
+        'أهلا': 'Hi',
+        'شكراً': 'Thank you',
+        'صباح الخير': 'Good morning',
+        'مساء الخير': 'Good evening'
+    }
+    
+    text_lower = text.lower()
+    for ar, en in translations.items():
+        if ar in text_lower:
+            return f"← {en}"
+    
+    return "للترجمة الدقيقة، فعّل الذكاء الاصطناعي"
+
+def calculate_basic(text):
+    """Basic calculation attempt"""
+    try:
+        # Replace Arabic/Persian numbers
+        text = text.replace('×', '*').replace('÷', '/')
+        
+        # Simple evaluation (be careful with eval!)
+        numbers = '0123456789+-*/.() '
+        clean_text = ''.join(c for c in text if c in numbers)
+        
+        if clean_text:
+            result = eval(clean_text)
+            return f"≈ {result}"
+    except:
+        pass
+    
+    return "للحسابات المعقدة، فعّل الذكاء الاصطناعي"
+
+def detect_topic(text):
+    """Detect topic of question"""
+    text_lower = text.lower()
+    
+    if any(word in text_lower for word in ['تاريخ', 'history', 'war', 'ancient']):
+        return "التاريخ"
+    elif any(word in text_lower for word in ['علم', 'science', 'physics', 'chemistry']):
+        return "العلوم"
+    elif any(word in text_lower for word in ['تقنية', 'technology', 'computer', 'internet']):
+        return "التكنولوجيا"
+    elif any(word in text_lower for word in ['صحة', 'health', 'medicine', 'doctor']):
+        return "الصحة"
+    elif any(word in text_lower for word in ['رياضة', 'sport', 'football', 'basketball']):
+        return "الرياضة"
+    else:
+        return "عام"
+
+def detect_text_type(text):
+    """Detect type of text"""
+    if '?' in text or any(word in text.lower() for word in ['كيف', 'ما', 'متى', 'what', 'how']):
+        return "سؤال"
+    elif any(word in text.lower() for word in ['شكرا', 'thank', 'thanks']):
+        return "شكر"
+    elif len(text.split()) > 20:
+        return "نص طويل"
+    else:
+        return "رسالة قصيرة"
+
+def analyze_sentiment(text):
+    """Basic sentiment analysis"""
+    positive = ['جيد', 'ممتاز', 'رائع', 'good', 'great', 'awesome', 'love']
+    negative = ['سيء', 'سيئ', 'خطأ', 'bad', 'terrible', 'hate', 'wrong']
+    
+    text_lower = text.lower()
+    pos_count = sum(1 for word in positive if word in text_lower)
+    neg_count = sum(1 for word in negative if word in text_lower)
+    
+    if pos_count > neg_count:
+        return "إيجابي ✨"
+    elif neg_count > pos_count:
+        return "يحتاج تحسين 🔧"
+    else:
+        return "محايد ⚖️"
 
 async def analyze_image(image_data, prompt="اشرح ما تراه في هذه الصورة"):
     """Analyze image using Gemini Vision"""
-    if not gemini_model:
-        return "📸 **تحليل الصور غير متاح حالياً**\n\nلتفعيل تحليل الصور، أضف مفتاح Gemini API في إعدادات Railway."
+    if not gemini_vision:
+        return """
+📸 **تحليل الصور الأساسي**
+
+❗ **تحليل الصور المتقدم غير مفعل حالياً**
+
+🔮 **لتفعيل تحليل الصور بالذكاء الاصطناعي:**
+أضف متغير GEMINI_API_KEY في إعدادات Railway
+
+🚀 **مع تحليل الصور المتقدم ستحصل على:**
+• وصف تفصيلي للصورة
+• تحليل المحتوى والعناصر
+• إجابة أسئلة حول الصورة
+• تحليل النصوص في الصور
+• تعريف الأشياء والأماكن
+• تحليل المشاعر والحالة المزاجية
+
+💡 **حاول إضافة مفتاح Gemini API للاستفادة الكاملة!**
+"""
     
     try:
         response = await asyncio.to_thread(
@@ -224,139 +389,172 @@ async def analyze_image(image_data, prompt="اشرح ما تراه في هذه �
         return f"📸 **تحليل الصورة بالذكاء الاصطناعي:**\n\n{response.text}"
     except Exception as e:
         logger.error(f"Image analysis error: {e}")
-        return f"❌ **خطأ في تحليل الصورة:** {str(e)}"
+        return f"❌ **خطأ في تحليل الصورة:** {str(e)}\n\nحاول مرة أخرى أو تحقق من إعدادات Gemini API."
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
     user = update.effective_user
-    logger.info(f"📨 /start from {user.first_name}")
+    chat = update.effective_chat
     
-    # Check subscription
-    is_subscribed = await check_subscription(context, user.id)
+    logger.info(f"📨 /start from {user.first_name} in {chat.type}")
     
-    if not is_subscribed:
-        welcome_text = f"""
+    # If in private chat
+    if chat.type == ChatType.PRIVATE:
+        # Check subscriptions to all channels where bot is admin
+        required_channels = await get_user_channels(context, user.id)
+        
+        if required_channels:
+            welcome_text = f"""
 🤖 **مرحباً {user.first_name}!**
 
 أهلاً بك في **بوت الذكاء الاصطناعي المتطور**!
 
-🧠 **يمكنني مساعدتك في:**
-• الإجابة على جميع الأسئلة
-• الترجمة بين اللغات  
+🧠 **قدراتي المتقدمة:**
+• إجابة جميع الأسئلة
+• ترجمة فورية لأكثر من 100 لغة
 • حل المسائل الرياضية
-• المساعدة في البرمجة
-• تحليل وشرح النصوص
-• تحليل الصور
+• مساعدة في البرمجة
+• تحليل الصور والنصوص
+• كتابة وتحرير المحتوى
 
 ⚠️ **شرط الاستخدام:**
-للاستفادة من البوت، يرجى الاشتراك في قناتنا أولاً:
+للاستفادة من البوت، يرجى الاشتراك في القنوات التالية:
 
-📺 **القناة:** {CHANNEL_USERNAME}
-
-👇 اضغط الزر أدناه للاشتراك:
+👇 **اشترك في جميع القنوات:**
 """
-        
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=create_subscription_keyboard()
-        )
-    else:
-        welcome_text = f"""
+            
+            await update.message.reply_text(
+                welcome_text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=create_subscription_keyboard(required_channels)
+            )
+        else:
+            welcome_text = f"""
 🎉 **أهلاً وسهلاً {user.first_name}!**
 
-مرحباً بك في بوت الذكاء الاصطناعي! 
+مرحباً بك في بوت الذكاء الاصطناعي المتطور!
 
-🧠 **الذكاء الاصطناعي المتاح:**
-• OpenAI GPT: {'🟢 متاح' if openai_client else '🔴 يحتاج تفعيل'}
-• Google Gemini: {'🟢 متاح' if gemini_model else '🔴 يحتاج تفعيل'}
+🧠 **الأنظمة المتاحة:**
+• OpenAI GPT: {'🟢 نشط' if openai_client else '🔴 يحتاج تفعيل'}
+• Google Gemini: {'🟢 نشط' if gemini_model else '🔴 يحتاج تفعيل'}
+• التحليل الأساسي: 🟢 متاح دائماً
 
 💬 **كيفية الاستخدام:**
-أرسل أي سؤال أو نص وسأجيب عليه بذكاء!
+• أرسل أي سؤال نصي
+• أرسل صورة مع سؤال
+• اطلب الترجمة
+• اسأل عن البرمجة
+• احتج لحل مسائل رياضية
 
-📸 **تحليل الصور:**
-أرسل صورة مع تعليق وسأحللها لك!
-
-🔤 **الترجمة:**
-اكتب "ترجم إلى الإنجليزية: النص هنا"
-
-🧮 **الرياضيات:**
-اسأل أي سؤال رياضي وسأحله لك!
-
-💻 **البرمجة:**
-اطلب المساعدة في أي لغة برمجة!
+🎯 **أمثلة على الاستخدام:**
+• "ما هو الذكاء الاصطناعي؟"
+• "ترجم إلى الإنجليزية: مرحبا بك"
+• "احسب 25 × 15 + 100"
+• "كيف أتعلم Python؟"
+• أرسل صورة واسأل عنها
 
 💬 **ابدأ بسؤالك الآن...**
 """
-        
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode=ParseMode.MARKDOWN
-        )
+            
+            await update.message.reply_text(
+                welcome_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    # If in group/channel
+    else:
+        if user.id == ADMIN_ID:
+            await update.message.reply_text(
+                f"""
+👑 **مرحباً أيها المدير!**
+
+🤖 **حالة البوت في هذه القناة:**
+• الاسم: {chat.title}
+• النوع: {chat.type}
+• الأعضاء: مجهول
+
+⚙️ **لتفعيل البوت كمشرف:**
+1. أضف البوت كمشرف في القناة
+2. أعطه صلاحيات قراءة الأعضاء
+3. المستخدمون سيحتاجون للاشتراك للاستخدام
+
+✅ **البوت جاهز للعمل!**
+""",
+                parse_mode=ParseMode.MARKDOWN
+            )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle callback queries"""
     query = update.callback_query
     await query.answer()
     
-    if query.data == "check_sub":
+    if query.data == "check_all_subs":
         user_id = query.from_user.id
-        is_subscribed = await check_subscription(context, user_id)
+        is_subscribed = await check_all_subscriptions(context, user_id)
         
         if is_subscribed:
             await query.edit_message_text(
                 f"""
 ✅ **تم التحقق بنجاح!**
 
-🎉 مرحباً بك {query.from_user.first_name}!
+🎉 **مرحباً بك {query.from_user.first_name}!**
 
-🧠 **يمكنك الآن استخدام البوت:**
+🧠 **يمكنك الآن استخدام جميع القدرات:**
 • اسأل أي سؤال
 • أرسل صورة للتحليل
 • اطلب الترجمة
 • احتج لحل مسائل
+• اطلب المساعدة في البرمجة
 
 💬 **ابدأ بسؤالك الآن...**
 """,
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
+            required_channels = await get_user_channels(context, user_id)
             await query.edit_message_text(
                 f"""
-❌ **لم تشترك بعد!**
+❌ **لم تكمل الاشتراك بعد!**
 
-يرجى الاشتراك في القناة أولاً: {CHANNEL_USERNAME}
+📺 **يرجى الاشتراك في جميع القنوات المطلوبة**
 
-📺 تأكد من:
-• الاشتراك في القناة
+✅ **تأكد من:**
+• الاشتراك في كل قناة
 • عدم كتم الإشعارات
-• انتظار دقيقة واحدة ثم المحاولة مرة أخرى
+• انتظار دقيقة واحدة
+• ثم اضغط "تحقق" مرة أخرى
 
-👇 للاشتراك:
+👇 **القنوات المطلوبة:**
 """,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=create_subscription_keyboard()
+                reply_markup=create_subscription_keyboard(required_channels)
             )
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages"""
     user = update.effective_user
+    chat = update.effective_chat
     text = update.message.text
     
-    # Check subscription first
-    is_subscribed = await check_subscription(context, user.id)
+    # Only work in private chats
+    if chat.type != ChatType.PRIVATE:
+        return
+    
+    # Check subscriptions
+    is_subscribed = await check_all_subscriptions(context, user.id)
     
     if not is_subscribed:
+        required_channels = await get_user_channels(context, user.id)
         await update.message.reply_text(
-            f"⚠️ **يرجى الاشتراك في القناة أولاً!**\n\n📺 القناة: {CHANNEL_USERNAME}",
-            reply_markup=create_subscription_keyboard()
+            f"⚠️ **يرجى الاشتراك في جميع القنوات المطلوبة أولاً!**",
+            reply_markup=create_subscription_keyboard(required_channels)
         )
         return
     
     logger.info(f"💬 Text from {user.first_name}: {text[:50]}...")
     
     # Show typing
-    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    await context.bot.send_chat_action(chat.id, ChatAction.TYPING)
     
     # Get AI response
     response = await get_ai_response(text, user.first_name)
@@ -369,21 +567,27 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo messages"""
     user = update.effective_user
+    chat = update.effective_chat
     
-    # Check subscription first
-    is_subscribed = await check_subscription(context, user.id)
+    # Only work in private chats
+    if chat.type != ChatType.PRIVATE:
+        return
+    
+    # Check subscriptions
+    is_subscribed = await check_all_subscriptions(context, user.id)
     
     if not is_subscribed:
+        required_channels = await get_user_channels(context, user.id)
         await update.message.reply_text(
-            f"⚠️ **يرجى الاشتراك في القناة أولاً!**\n\n📺 القناة: {CHANNEL_USERNAME}",
-            reply_markup=create_subscription_keyboard()
+            f"⚠️ **يرجى الاشتراك في جميع القنوات المطلوبة أولاً!**",
+            reply_markup=create_subscription_keyboard(required_channels)
         )
         return
     
     logger.info(f"📸 Photo from {user.first_name}")
     
     try:
-        await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+        await context.bot.send_chat_action(chat.id, ChatAction.TYPING)
         
         # Get the largest photo
         photo = update.message.photo[-1]
@@ -406,13 +610,64 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Photo handler error: {e}")
         await update.message.reply_text(
-            f"❌ **خطأ في تحليل الصورة**\n\nللحصول على تحليل متقدم للصور، يرجى إضافة مفتاح Gemini API."
+            f"❌ **خطأ في تحليل الصورة**\n\nتأكد من إعدادات Gemini API أو حاول مرة أخرى."
         )
+
+async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle bot being added/removed from chats"""
+    chat_member = update.my_chat_member
+    chat = update.effective_chat
+    
+    if chat_member.new_chat_member.status in ['administrator', 'member']:
+        # Bot was added to channel/group
+        logger.info(f"🎉 Bot added to {chat.title} ({chat.id})")
+        
+        # Store channel info
+        bot_channels[chat.id] = {
+            'id': chat.id,
+            'title': chat.title,
+            'username': chat.username,
+            'type': chat.type
+        }
+        
+        # Send welcome message to admin
+        if chat.type in [ChatType.CHANNEL, ChatType.SUPERGROUP]:
+            try:
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    f"""
+🎉 **تم إضافة البوت بنجاح!**
+
+📺 **القناة:** {chat.title}
+🆔 **المعرف:** {chat.id}
+👥 **النوع:** {chat.type}
+
+✅ **البوت الآن يعمل كمشرف**
+المستخدمون يجب أن يشتركوا في هذه القناة لاستخدام البوت
+
+⚙️ **تأكد من إعطاء البوت صلاحيات:**
+• قراءة الرسائل
+• إدارة الأعضاء
+
+🚀 **البوت جاهز للعمل!**
+""",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except:
+                pass
+    
+    elif chat_member.new_chat_member.status in ['left', 'kicked']:
+        # Bot was removed
+        logger.info(f"😞 Bot removed from {chat.title}")
+        
+        # Remove from stored channels
+        if chat.id in bot_channels:
+            del bot_channels[chat.id]
 
 def main():
     """Main function"""
     try:
-        logger.info("🚀 Starting AI Channel Bot...")
+        logger.info("🚀 Starting Channel Admin Bot...")
         
         if not BOT_TOKEN:
             logger.error("❌ No bot token!")
@@ -426,8 +681,9 @@ def main():
         app.add_handler(CallbackQueryHandler(callback_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
         app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+        app.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
         
-        logger.info("✅ AI Channel Bot ready!")
+        logger.info("✅ Channel Admin Bot ready!")
         
         # Run the bot
         app.run_polling(drop_pending_updates=True)
